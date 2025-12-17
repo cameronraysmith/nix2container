@@ -51,13 +51,40 @@ let
     in ''
       mkdir -p vendor/github.com/nlewo/nix2container/
       cp -r ${nix2container-bin.src}/* vendor/github.com/nlewo/nix2container/
-      cd vendor/github.com/containers/image/v5
-      mkdir nix/
+
+      # Handle both old (github.com/containers/image) and new (go.podman.io/image) module paths
+      # containers/image was renamed to go.podman.io/image in skopeo >= 1.15
+      if [ -d vendor/go.podman.io/image/v5 ]; then
+        IMAGE_VENDOR_PATH="vendor/go.podman.io/image/v5"
+        IMAGE_IMPORT_PATH="go.podman.io/image/v5"
+      elif [ -d vendor/github.com/containers/image/v5 ]; then
+        IMAGE_VENDOR_PATH="vendor/github.com/containers/image/v5"
+        IMAGE_IMPORT_PATH="github.com/containers/image/v5"
+      else
+        echo "Error: Could not find image module in vendor directory"
+        echo "Checked: vendor/go.podman.io/image/v5 and vendor/github.com/containers/image/v5"
+        ls -la vendor/ || true
+        exit 1
+      fi
+
+      # Rewrite imports in nix2container source to use correct module path
+      # This is needed because nix2container's Go code imports github.com/containers/image/v5
+      # but the module may now be at go.podman.io/image/v5
+      # Note: files are read-only from nix store, so make writable first
+      chmod -R u+w vendor/github.com/nlewo/nix2container/
+      find vendor/github.com/nlewo/nix2container -name '*.go' -exec \
+        sed -i "s|github.com/containers/image/v5|$IMAGE_IMPORT_PATH|g" {} \;
+
+      cd "$IMAGE_VENDOR_PATH"
+      mkdir -p nix/
       touch nix/transport.go
       # The patch for alltransports.go does not apply cleanly to skopeo > 1.14,
       # filter the patch and insert the import manually here instead.
-      filterdiff -x '*/alltransports.go' ${patch} | patch -p1
-      sed -i '\#_ "github.com/containers/image/v5/tarball"#a _ "github.com/containers/image/v5/nix"' transports/alltransports/alltransports.go
+      # Rewrite patch paths from github.com/containers/image to current module path
+      filterdiff -x '*/alltransports.go' ${patch} | \
+        sed "s|github.com/containers/image/v5|$IMAGE_IMPORT_PATH|g" | \
+        patch -p1
+      sed -i '\#_ "'"$IMAGE_IMPORT_PATH"'/tarball"#a _ "'"$IMAGE_IMPORT_PATH"'/nix"' transports/alltransports/alltransports.go
       cd -
 
       # Go checks packages in the vendor directory are declared in the modules.txt file.
@@ -65,7 +92,7 @@ let
       echo '## explicit; go 1.13' >> vendor/modules.txt
       echo github.com/nlewo/nix2container/nix >> vendor/modules.txt
       echo github.com/nlewo/nix2container/types >> vendor/modules.txt
-      echo github.com/containers/image/v5/nix >> vendor/modules.txt
+      echo "$IMAGE_IMPORT_PATH/nix" >> vendor/modules.txt
       # All packages declared in the modules.txt file must also be required by the go.mod file.
       echo 'require (' >> go.mod
       echo '  github.com/nlewo/nix2container v1.0.0' >> go.mod
